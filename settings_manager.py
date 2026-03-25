@@ -54,25 +54,43 @@ class SettingsManager:
         """Получение настроек по умолчанию"""
         return {
             "openai_api_key": "",
+            "deepseek_api_key": "",
+            "gemini_api_key": "",
+            # Production: gemini-2.5-flash | gemini-2.5-pro | gemini-2.5-flash-lite; preview: gemini-3-*-preview
+            "gemini_model": "gemini-2.5-flash",
+            "llm_provider": "openai",  # openai, deepseek, gemini
             "default_theme": "РЕНТГЕНОДИАГНОСТИКА ЗАБОЛЕВАНИЙ КОСТЕЙ И СУСТАВОВ",
-            "model": "gpt-4o",
+            "model": "gpt-5.2",
+            "deepseek_model": "deepseek-chat",
             "temperature": 0.4,
-            "max_tokens": 2000,
+            "max_tokens": 8192,
+            "max_tokens_article": 32768,
             "block_size": 500,
             "auto_save": True,
             "last_used_theme": "",
             "include_research": False,  # Добавлено по умолчанию флаг добавления исследований
+            "plan_steps": 10,  # Количество пунктов плана для генерации статьи (5–20)
+            # Параметры управления стилем статьи (1-5)
+            "style_science": 3,
+            "style_depth": 3,
+            "style_accuracy": 3,
+            "style_readability": 3,
+            "style_source_quality": 3,
             # API ключи для иллюстраций
             "nanobanana_api_key": "",  # Для генерации изображений
             "dalle_api_key": "",  # Для генерации изображений через DALL-E 2
             "google_search_api_key": "",  # Для поиска клинических изображений
             "google_search_engine_id": "",  # ID поисковой системы Google
+            "tavily_api_key": "",  # Для поиска медицинских изображений через Tavily
             # Настройки иллюстраций
             "auto_illustration": False,  # Автоматическая иллюстрация
             "illustration_quality": "high",  # Качество изображений
             "brand_style": "medical",  # Стиль брендинга
+            "illustration_style": "academic",  # Стиль для NanaBanana: minimalist, cartoon, academic, realistic, semi_realistic, diagrammatic, infographic, isometric, 3d, editorial
             "tcia_enabled": False,  # TCIA API (бесплатный) - отключен по умолчанию из-за проблем с доступностью
-            "tcia_timeout": 30  # Таймаут для TCIA API в секундах
+            "tcia_timeout": 30,  # Таймаут для TCIA API в секундах
+            "token_budget_usd": 0.0,  # Лимит расхода в USD за месяц (0 = без лимита)
+            "model_presets": {},  # Пресеты настроек модели: { "Название": { "llm_provider": ..., "temperature": ..., ... } }
         }
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -152,6 +170,52 @@ class SettingsManager:
         """
         return self._settings.copy()
 
+    # Ключи настроек модели для пресетов (без API ключей)
+    MODEL_PRESET_KEYS = [
+        "llm_provider", "model", "deepseek_model", "gemini_model",
+        "temperature", "max_tokens", "max_tokens_article", "plan_steps",
+        "style_science", "style_depth", "style_accuracy", "style_readability", "style_source_quality",
+    ]
+
+    def get_model_presets(self) -> Dict[str, Dict[str, Any]]:
+        """Возвращает словарь сохранённых пресетов настроек модели."""
+        return self.get("model_presets", {}) or {}
+
+    def save_model_preset(self, name: str) -> None:
+        """Сохраняет текущие настройки модели под указанным именем."""
+        name = (name or "").strip()
+        if not name:
+            return
+        presets = self.get_model_presets().copy()
+        presets[name] = {k: self._settings.get(k) for k in self.MODEL_PRESET_KEYS if k in self._settings}
+        self._settings["model_presets"] = presets
+        if self.get("auto_save", True):
+            self._save_settings()
+
+    def load_model_preset(self, name: str) -> bool:
+        """Применяет пресет к текущим настройкам. Возвращает True, если пресет найден и применён."""
+        presets = self.get_model_presets()
+        if name not in presets:
+            return False
+        for k, v in presets[name].items():
+            if k in self.MODEL_PRESET_KEYS:
+                self._settings[k] = v
+        if self.get("auto_save", True):
+            self._save_settings()
+        return True
+
+    def delete_model_preset(self, name: str) -> bool:
+        """Удаляет пресет по имени. Возвращает True, если пресет существовал и удалён."""
+        presets = self.get_model_presets()
+        if name not in presets:
+            return False
+        presets = presets.copy()
+        del presets[name]
+        self._settings["model_presets"] = presets
+        if self.get("auto_save", True):
+            self._save_settings()
+        return True
+
     def reset_to_defaults(self) -> None:
         """Сброс настроек к значениям по умолчанию"""
         self._settings = self._get_default_settings()
@@ -162,13 +226,34 @@ class SettingsManager:
         """Строковое представление настроек (без чувствительных данных)"""
         settings_copy = self._settings.copy()
 
-        # Маскируем API ключ
+        # Маскируем API ключи
         if "openai_api_key" in settings_copy:
             api_key = settings_copy["openai_api_key"]
             if api_key:
                 settings_copy["openai_api_key"] = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
             else:
                 settings_copy["openai_api_key"] = "(не установлен)"
+
+        if "deepseek_api_key" in settings_copy:
+            api_key = settings_copy["deepseek_api_key"]
+            if api_key:
+                settings_copy["deepseek_api_key"] = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
+            else:
+                settings_copy["deepseek_api_key"] = "(не установлен)"
+
+        if "gemini_api_key" in settings_copy:
+            api_key = settings_copy["gemini_api_key"]
+            if api_key:
+                settings_copy["gemini_api_key"] = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
+            else:
+                settings_copy["gemini_api_key"] = "(не установлен)"
+
+        if "tavily_api_key" in settings_copy:
+            api_key = settings_copy["tavily_api_key"]
+            if api_key:
+                settings_copy["tavily_api_key"] = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
+            else:
+                settings_copy["tavily_api_key"] = "(не установлен)"
 
         return f"SettingsManager(settings_file={self.settings_file}, settings={settings_copy})"
 
@@ -218,7 +303,8 @@ def set_nanobanana_api_key(api_key: str) -> None:
         settings_manager.set("nanobanana_api_key", api_key.strip())
         print("🎨 API ключ NanoBanana сохранен")
     else:
-        print("⚠️  API ключ NanoBanana не может быть пустым")
+        settings_manager.set("nanobanana_api_key", "")
+        print("🗑️ API ключ NanoBanana удален")
 
 def get_google_search_api_key() -> str:
     """Получение API ключа Google Custom Search"""
@@ -230,7 +316,8 @@ def set_google_search_api_key(api_key: str) -> None:
         settings_manager.set("google_search_api_key", api_key.strip())
         print("🔍 API ключ Google Custom Search сохранен")
     else:
-        print("⚠️  API ключ Google Custom Search не может быть пустым")
+        settings_manager.set("google_search_api_key", "")
+        print("🗑️ API ключ Google Custom Search удален")
 
 def get_google_search_engine_id() -> str:
     """Получение ID поисковой системы Google"""
@@ -242,7 +329,21 @@ def set_google_search_engine_id(engine_id: str) -> None:
         settings_manager.set("google_search_engine_id", engine_id.strip())
         print("🔍 ID поисковой системы Google сохранен")
     else:
-        print("⚠️  ID поисковой системы Google не может быть пустым")
+        settings_manager.set("google_search_engine_id", "")
+        print("🗑️ ID поисковой системы Google удален")
+
+def get_tavily_api_key() -> str:
+    """Получение API ключа Tavily"""
+    return settings_manager.get("tavily_api_key", "")
+
+def set_tavily_api_key(api_key: str) -> None:
+    """Установка API ключа Tavily"""
+    if api_key and api_key.strip():
+        settings_manager.set("tavily_api_key", api_key.strip())
+        print("🔍 API ключ Tavily сохранен")
+    else:
+        settings_manager.set("tavily_api_key", "")
+        print("🗑️ API ключ Tavily удален")
 
 def get_dalle_api_key() -> str:
     """Получение API ключа DALL-E 2"""
@@ -254,11 +355,58 @@ def set_dalle_api_key(api_key: str) -> None:
         settings_manager.set("dalle_api_key", api_key.strip())
         print("🎨 API ключ DALL-E 2 сохранен")
     else:
-        print("⚠️  API ключ DALL-E 2 не может быть пустым")
+        settings_manager.set("dalle_api_key", "")
+        print("🗑️ API ключ DALL-E 2 удален")
 
 def has_illustration_apis() -> bool:
     """Проверка наличия API ключей для иллюстраций"""
     nanobanana = bool(get_nanobanana_api_key())
     dalle = bool(get_dalle_api_key())
     google = bool(get_google_search_api_key() and get_google_search_engine_id())
-    return nanobanana or dalle or google
+    tavily = bool(get_tavily_api_key())
+    return nanobanana or dalle or google or tavily
+
+def get_deepseek_api_key() -> str:
+    """Получение API ключа DeepSeek"""
+    return settings_manager.get("deepseek_api_key", "")
+
+def set_deepseek_api_key(api_key: str) -> None:
+    """Установка API ключа DeepSeek"""
+    if api_key and api_key.strip():
+        settings_manager.set("deepseek_api_key", api_key.strip())
+        print("🔑 API ключ DeepSeek сохранен")
+    else:
+        settings_manager.set("deepseek_api_key", "")
+        print("🗑️ API ключ DeepSeek удален")
+
+def get_llm_provider() -> str:
+    """Получение текущего провайдера LLM"""
+    return settings_manager.get("llm_provider", "openai")
+
+def set_llm_provider(provider: str) -> None:
+    """Установка текущего провайдера LLM"""
+    if provider in ["openai", "deepseek", "gemini"]:
+        settings_manager.set("llm_provider", provider)
+        print(f"🤖 Провайдер LLM изменен на {provider}")
+
+def get_gemini_api_key() -> str:
+    """Получение API ключа Gemini"""
+    return settings_manager.get("gemini_api_key", "")
+
+def set_gemini_api_key(api_key: str) -> None:
+    """Установка API ключа Gemini"""
+    if api_key and api_key.strip():
+        settings_manager.set("gemini_api_key", api_key.strip())
+        print("🔑 API ключ Gemini сохранен")
+    else:
+        settings_manager.set("gemini_api_key", "")
+        print("🗑️ API ключ Gemini удален")
+
+def has_active_api_key() -> bool:
+    """Проверка наличия API ключа для текущего провайдера"""
+    provider = get_llm_provider()
+    if provider == "deepseek":
+        return bool(get_deepseek_api_key())
+    if provider == "gemini":
+        return bool(get_gemini_api_key())
+    return has_api_key()

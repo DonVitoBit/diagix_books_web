@@ -22,8 +22,19 @@ wheels/
 
 # Virtual environments
 venv/
+.venv/
 env/
 ENV/
+
+# Кэш изображений из PDF и сгенерированные иллюстрации (не в репозиторий)
+extracted_images/
+generated_article_images/
+output/
+
+# Архивы и локальные копии фронта
+*.tar.gz
+*.zip
+_frontend_repo/
 
 # IDE
 .vscode/
@@ -41,3 +52,15 @@ Thumbs.db
 # Settings that may contain sensitive data
 # Note: settings.json is included in repo as it's part of the project structure
 settings.json
+
+# Local users (moderators)
+users.json
+
+# Local database
+app.db
+
+# Сессии «Запомнить меня»
+.sessions.json
+
+# Локальный прокси для start_with_proxy.sh (секреты)
+scripts/proxy.env

@@ -15,17 +15,19 @@ class BaseUI:
     @staticmethod
     def setup_page():
         """Настройка страницы Streamlit"""
-        st.set_page_config(
-            page_title=APP_TITLE,
-            page_icon=APP_ICON,
-            layout=LAYOUT,
-            initial_sidebar_state="expanded"
-        )
+        kwargs = {
+            "page_title": APP_TITLE,
+            "layout": LAYOUT,
+            "initial_sidebar_state": "expanded",
+        }
+        if APP_ICON:
+            kwargs["page_icon"] = APP_ICON
+        st.set_page_config(**kwargs)
 
     @staticmethod
-    def create_tabs():
+    def create_tabs(tab_names=None):
         """Создание вкладок приложения"""
-        return st.tabs(TAB_NAMES)
+        return st.tabs(tab_names if tab_names is not None else TAB_NAMES)
 
     @staticmethod
     def init_session_state():
@@ -40,7 +42,7 @@ class BaseUI:
             st.session_state.show_api_key_form = False
 
         if 'api_key_status' not in st.session_state:
-            st.session_state.api_key_status = "🔑 API ключ " + ("сохранен" if has_api_key() else "не установлен")
+            st.session_state.api_key_status = "API ключ " + ("сохранен" if has_api_key() else "не установлен")
 
         # Дополнительные переменные состояния для обработки текста
         if 'processing_complete' not in st.session_state:
@@ -59,3 +61,13 @@ class BaseUI:
         # Переменные состояния для API ключей
         if 'show_nanobanana_settings' not in st.session_state:
             st.session_state.show_nanobanana_settings = False
+
+        # Состояние авторизации
+        if 'authenticated' not in st.session_state:
+            st.session_state.authenticated = False
+        if 'user_role' not in st.session_state:
+            st.session_state.user_role = "guest"  # guest|admin|moderator
+        if 'username' not in st.session_state:
+            st.session_state.username = ""
+        if 'display_name' not in st.session_state:
+            st.session_state.display_name = ""

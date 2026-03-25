@@ -1,0 +1,23 @@
+# systemd unit для med_book (Streamlit) на 95.174.93.35
+# Установка (на сервере от root):
+#   sudo cp /home/user1/med_book/deploy/med_book.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable med_book
+#   sudo systemctl start med_book
+# Перезапуск после деплоя:
+#   sudo systemctl restart med_book
+
+[Unit]
+Description=Med Book Streamlit App
+After=network.target
+
+[Service]
+Type=simple
+User=user1
+WorkingDirectory=/home/user1/med_book
+ExecStart=/home/user1/med_book/scripts/start_with_proxy.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

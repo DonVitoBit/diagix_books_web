@@ -25,8 +25,10 @@ from settings_manager import (
     get_dalle_api_key,
     get_google_search_api_key,
     get_google_search_engine_id,
+    get_tavily_api_key,
     settings_manager
 )
+from config import ILLUSTRATION_STYLES
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -39,8 +41,9 @@ class IllustrationPipeline:
         """Инициализация pipeline иллюстраций"""
         self.nanobanana_api_key = get_nanobanana_api_key()
         self.dalle_api_key = get_dalle_api_key()
-        self.google_api_key = get_google_search_api_key()
-        self.google_engine_id = get_google_search_engine_id()
+        self.google_search_api_key = get_google_search_api_key()
+        self.google_search_engine_id = get_google_search_engine_id()
+        self.tavily_api_key = get_tavily_api_key()
         self.tcia_enabled = settings_manager.get("tcia_enabled", True)
         self.auto_illustration = settings_manager.get("auto_illustration", False)
         self.illustration_quality = settings_manager.get("illustration_quality", "high")
@@ -55,7 +58,7 @@ class IllustrationPipeline:
         logger.info("IllustrationPipeline инициализирован")
         logger.info(f"NanoBanana API: {'✅' if self.nanobanana_api_key else '❌'}")
         logger.info(f"DALL-E 2 API: {'✅' if self.dalle_api_key else '❌'}")
-        logger.info(f"Google Search API: {'✅' if self.google_api_key and self.google_engine_id else '❌'}")
+        logger.info(f"Google Search API: {'✅' if self.google_search_api_key and self.google_search_engine_id else '❌'}")
         logger.info(f"TCIA API: {'✅' if self.tcia_enabled else '❌'}")
 
     def _load_pathology_search_list(self) -> List[Dict]:
@@ -100,9 +103,10 @@ class IllustrationPipeline:
         except Exception as e:
             logger.error(f"Ошибка сохранения метаданных изображений: {e}")
 
-    def extract_images_from_pdf(self, pdf_path: str, progress_callback=None) -> List[Dict]:
+    def extract_images_from_pdf(self, pdf_path: str, image_callback=None) -> List[Dict]:
         """Извлечение изображений из PDF с их описанием"""
         images = []
+        used_xrefs = set()
         try:
             doc = fitz.open(pdf_path)
             for page_num in range(len(doc)):
@@ -111,9 +115,55 @@ class IllustrationPipeline:
                 
                 for img_index, img in enumerate(image_list):
                     xref = img[0]
-                    pix = fitz.Pixmap(doc, xref)
                     
-                    if pix.n - pix.alpha < 4:  # GRAY или RGB
+                    # Пропуск дубликатов
+                    if xref in used_xrefs:
+                        continue
+                    used_xrefs.add(xref)
+                    
+                    try:
+                        pix = fitz.Pixmap(doc, xref)
+                    except Exception as e:
+                        logger.debug(f"Пропуск xref {xref}: не удалось создать Pixmap — {e}")
+                        continue
+
+                    # Конвертация CMYK и других цветовых пространств в RGB для сохранения в PNG
+                    try:
+                        if pix.n - pix.alpha >= 4:  # CMYK или больше компонентов
+                            pix = fitz.Pixmap(fitz.csRGB, pix)
+                    except Exception as e:
+                        logger.debug(f"Пропуск xref {xref}: конвертация в RGB — {e}")
+                        pix = None
+                        continue
+
+                    if pix is None or (pix.n - pix.alpha > 3):
+                        pix = None
+                        continue
+
+                    if pix.n - pix.alpha <= 3:  # GRAY или RGB
+                        # 1. Проверка площади (фильтр фоновых подложек)
+                        img_rects = page.get_image_rects(xref)
+                        if img_rects:
+                            r = img_rects[0]
+                            page_area = page.rect.width * page.rect.height
+                            img_area = r.width * r.height
+                            if img_area > page_area * 0.7: # Порог 70% площади страницы
+                                logger.info(f"Пропущено полностраничное фоновое изображение (площадь: {img_area/page_area:.2%})")
+                                pix = None
+                                continue
+
+                        # 2. Фильтр: слишком маленькие изображения (иконки, линии, мусор)
+                        if pix.width < 80 or pix.height < 80:
+                            logger.info(f"Пропущено маленькое изображение ({pix.width}x{pix.height})")
+                            pix = None
+                            continue
+
+                        # 3. Фильтр: пустые, однотонные или градиентные артефакты
+                        if self._is_image_blank(pix):
+                            logger.info(f"Пропущено пустое или артефактное изображение")
+                            pix = None
+                            continue
+
                         # Получаем текст вокруг изображения для контекста
                         text_around = self._get_text_around_image(page, img)
                         
@@ -152,9 +202,9 @@ class IllustrationPipeline:
                         log_message = f"Извлечено изображение: {image_info['file_path']}"
                         logger.info(log_message)
 
-                        # Вызываем callback для обновления UI
-                        if progress_callback:
-                            progress_callback(log_message)
+                        # Вызываем callback для отображения изображения в UI
+                        if image_callback:
+                            image_callback(image_info["file_path"], image_info["page"], img_index + 1)
                     
                     pix = None
             
@@ -164,6 +214,13 @@ class IllustrationPipeline:
             self._save_image_metadata()
 
             logger.info(f"Извлечено {len(images)} изображений из PDF")
+            if len(images) == 0:
+                logger.warning(
+                    "Изображения в PDF не найдены. Возможные причины: "
+                    "CMYK/другие цветовые пространства (теперь конвертируются в RGB), "
+                    "все картинки отфильтрованы по размеру/пустоте, "
+                    "или графика только векторная (не извлекается через get_images)."
+                )
             return images
             
         except Exception as e:
@@ -308,6 +365,66 @@ class IllustrationPipeline:
         
         return None
 
+    def _is_image_blank(self, pix) -> bool:
+        """Проверка, является ли изображение пустым, фоновым, шумом или градиентом"""
+        try:
+            samples = pix.samples
+            if not samples:
+                return True
+            
+            # Выборка данных для анализа
+            step = max(1, len(samples) // 8000)
+            data_subset = list(samples[::step])
+            
+            if len(data_subset) < 100:
+                return True
+                
+            import statistics
+            mean_val = sum(data_subset) / len(data_subset)
+            stdev = statistics.stdev(data_subset)
+            
+            # 1. Проверка на уникальность цветов (маски и простые градиенты)
+            # Порог 10: допускаем схемы и ч/б рисунки с малым числом цветов
+            unique_values = len(set(data_subset))
+            if unique_values < 10:
+                logger.debug(f"Пропущено: слишком мало уникальных цветов ({unique_values})")
+                return True
+
+            # 2. Проверка контрастности (стандартное отклонение)
+            if stdev < 15:
+                logger.debug(f"Пропущено: низкая контрастность (stdev: {stdev:.2f})")
+                return True
+
+            # 3. Анализ диапазона яркости (перцентили)
+            sorted_samples = sorted(data_subset)
+            p5 = sorted_samples[int(len(sorted_samples) * 0.05)]
+            p95 = sorted_samples[int(len(sorted_samples) * 0.95)]
+            if (p95 - p5) < 50:
+                logger.debug(f"Пропущено: узкий динамический диапазон ({p95-p5})")
+                return True
+
+            # 4. Детектор гладкости/размытости (Mean Absolute Difference)
+            diffs = [abs(data_subset[i] - data_subset[i-1]) for i in range(1, len(data_subset))]
+            mean_diff = sum(diffs) / len(diffs)
+            if mean_diff < 3.0:
+                logger.debug(f"Пропущено: слишком гладкое/размытое (mean_diff: {mean_diff:.2f})")
+                return True
+
+            # 5. Проверка "информативности" (преобладание одного цвета)
+            most_common_color = max(set(data_subset), key=data_subset.count)
+            if data_subset.count(most_common_color) / len(data_subset) > 0.90:
+                logger.debug(f"Пропущено: 90%+ изображения состоит из одного цвета")
+                return True
+            
+            # 6. Экстремальная яркость
+            if mean_val > 240 or mean_val < 15:
+                return True
+            
+            return False
+        except Exception as e:
+            logger.debug(f"Ошибка при проверке изображения: {e}")
+            return False
+
     def check_tcia_availability(self) -> bool:
         """Проверка доступности TCIA API"""
         try:
@@ -392,99 +509,223 @@ class IllustrationPipeline:
 
     def search_images_google(self, query: str, num_results: int = 5, error_callback=None) -> List[Dict]:
         """Поиск изображений через Google Custom Search API"""
-        if not self.google_api_key or not self.google_engine_id:
-            logger.warning("Google Custom Search API не настроен")
+        if not self.google_search_api_key or not self.google_search_engine_id:
+            logger.info("Google Search API не настроен, пропуск")
             return []
-        
+
         try:
             url = "https://www.googleapis.com/customsearch/v1"
             params = {
-                "key": self.google_api_key,
-                "cx": self.google_engine_id,
+                "key": self.google_search_api_key,
+                "cx": self.google_search_engine_id,
                 "q": query,
                 "searchType": "image",
-                "num": num_results,
-                "safe": "medium",
-                "imgType": "photo",
-                "imgSize": "large"
+                "num": num_results
             }
-            
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                images = []
-                
-                for item in data.get("items", []):
-                    image_info = {
-                        "title": item.get("title", ""),
-                        "url": item.get("link", ""),
-                        "thumbnail": item.get("image", {}).get("thumbnailLink", ""),
-                        "context": item.get("image", {}).get("contextLink", ""),
-                        "size": item.get("image", {}).get("byteSize", 0)
-                    }
-                    images.append(image_info)
-                
-                logger.info(f"Найдено {len(images)} изображений в Google для запроса '{query}'")
-                return images
-            else:
-                error_msg = f"Ошибка Google Custom Search API: {response.status_code}"
-                logger.error(error_msg)
-                if error_callback:
-                    error_callback(error_msg)
-                return []
 
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            results = []
+            if "items" in data:
+                for item in data["items"]:
+                    results.append({
+                        "title": item.get("title"),
+                        "url": item.get("link"),
+                        "thumbnail": item.get("image", {}).get("thumbnailLink")
+                    })
+            
+            return results
         except Exception as e:
-            error_msg = f"Ошибка поиска в Google: {e}"
+            error_msg = f"Ошибка поиска Google: {e}"
             logger.error(error_msg)
             if error_callback:
                 error_callback(error_msg)
             return []
 
-    def generate_image_nanobanana(self, prompt: str, style: str = "medical") -> Optional[str]:
-        """Генерация изображения через NanoBanana API"""
-        if not self.nanobanana_api_key:
-            logger.warning("NanoBanana API ключ не настроен")
-            return None
+    def search_images_tavily(self, query: str, num_results: int = 5, error_callback=None) -> List[Dict]:
+        """Поиск изображений через Tavily API"""
+        if not self.tavily_api_key:
+            logger.info("Tavily API ключ не настроен, пропуск")
+            return []
 
         try:
-            # Здесь будет интеграция с NanoBanana API
-            # Пока заглушка
-            logger.info(f"Генерация изображения через NanoBanana: {prompt}")
-            logger.info(f"Стиль: {style}")
+            url = "https://api.tavily.com/search"
+            payload = {
+                "api_key": self.tavily_api_key,
+                "query": query,
+                "include_images": True,
+                "max_results": num_results
+            }
 
-            # В реальной реализации:
-            # 1. Отправка запроса к NanoBanana API
-            # 2. Получение URL сгенерированного изображения
-            # 3. Скачивание и сохранение изображения
+            response = requests.post(url, json=payload, timeout=15)
+            response.raise_for_status()
+            data = response.json()
 
-            return None  # Заглушка
-
+            results = []
+            if "images" in data:
+                for img in data["images"]:
+                    if isinstance(img, str):
+                        results.append({
+                            "title": query,
+                            "url": img,
+                            "thumbnail": None
+                        })
+                    elif isinstance(img, dict):
+                        results.append({
+                            "title": img.get("title", query),
+                            "url": img.get("url"),
+                            "thumbnail": None
+                        })
+            
+            return results
         except Exception as e:
-            logger.error(f"Ошибка генерации изображения: {e}")
+            error_msg = f"Ошибка поиска Tavily: {e}"
+            logger.error(error_msg)
+            if error_callback:
+                error_callback(error_msg)
+            return []
+
+    def generate_image_nanobanana(
+        self, prompt: str, style: str = "medical", errors: Optional[List[str]] = None
+    ) -> Optional[str]:
+        """
+        Генерация изображения через Google GenAI (NanaBanana Pro / Gemini 3 Pro Image).
+        Возвращает путь к сохранённому файлу или None.
+        """
+        if not GOOGLE_GENAI_AVAILABLE:
+            msg = "Библиотека google-genai не установлена."
+            if errors is not None: errors.append(msg)
+            logger.error(msg)
             return None
 
-    def generate_image_dalle(self, prompt: str, size: str = "512x512", style: str = "natural") -> Optional[str]:
+        if not self.nanobanana_api_key:
+            msg = "Google (NanoBanana) API ключ не настроен."
+            if errors is not None: errors.append(msg)
+            logger.warning(msg)
+            return None
+
+        def _err(msg: str) -> None:
+            if errors is not None:
+                errors.append(msg)
+            logger.warning(msg)
+
+        def _pretty_model_name(model_name: str) -> str:
+            m = (model_name or "").strip().lower()
+            if m == "nanobanana-2":
+                return "NanaBanana 2"
+            return model_name or "unknown"
+
+        def _normalize_model_name(model_name: str) -> str:
+            """Нормализует пользовательские алиасы модели в ID, ожидаемый Google GenAI."""
+            m = (model_name or "").strip()
+            if not m:
+                return "gemini-3-pro-image-preview"
+            low = m.lower().replace("_", "-").replace(" ", "-")
+            if low in {"nanobanana2", "nanobanana-2", "nana-banana-2", "nana-banana2", "nana-bananna-2"}:
+                return "gemini-3-pro-image-preview"
+            return m
+
+        try:
+            # Инициализация клиента
+            client = genai.Client(api_key=self.nanobanana_api_key)
+            # По умолчанию используем gemini-3-pro-image-preview
+            model_id = _normalize_model_name(settings_manager.get("nanobanana_model", "gemini-3-pro-image-preview"))
+            _err(f"INFO: NanoBanana модель для генерации: {_pretty_model_name(model_id)} ({model_id})")
+            
+            # Возвращаем влияние выбранного стиля: добавляем style-инструкцию из config.
+            style_prefix = ILLUSTRATION_STYLES.get(style) or ILLUSTRATION_STYLES.get("academic", "")
+            style_clause = f" Style guidance: {style_prefix}." if style_prefix else ""
+            science = int(settings_manager.get("style_science", 3))
+            label_clause = (
+                " Use very simple Russian labels for children and broad audience (1-3 words), avoid complex terminology."
+                if science <= 2
+                else " Use medically precise Russian labels where needed."
+            )
+            # Промпт согласно спецификации: профессиональное качество, свет, 8K + стиль.
+            full_prompt = (
+                f"Generate a high-quality, professional image: {prompt}."
+                f" Make it artistic, detailed, with cinematic lighting and 8K quality."
+                f"{style_clause}{label_clause}"
+            )
+            
+            # Настройка конфига для получения изображения
+            kwargs = {}
+            if hasattr(types, "GenerateContentConfig"):
+                try:
+                    if hasattr(types, "Modality"):
+                        kwargs["config"] = types.GenerateContentConfig(response_modalities=[types.Modality.IMAGE])
+                    else:
+                        kwargs["config"] = types.GenerateContentConfig(response_modalities=["IMAGE"])
+                except Exception:
+                    pass
+
+            def _gen(model_name: str):
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=[types.Content(parts=[types.Part(text=full_prompt)])],
+                    **kwargs,
+                )
+
+            # Генерация контента (с fallback на Flash, если Pro недоступен на ключе)
+            try:
+                resp = _gen(model_id)
+            except Exception as e:
+                err = str(e)
+                _err(f"Google GenAI: не удалось вызвать {model_id}: {err[:120]}")
+                fallback_model = "gemini-2.5-flash-image"
+                _err(f"INFO: fallback на модель: {fallback_model}")
+                resp = _gen(fallback_model)
+
+            # Обработка ответа (ищем inline_data с изображением)
+            img_bytes = None
+            if resp.candidates:
+                for part in resp.candidates[0].content.parts:
+                    if part.inline_data:
+                        img_bytes = part.inline_data.data
+                        break
+            
+            if not img_bytes:
+                _err(f"Google API: ответ не содержит данных изображения. Ответ: {resp.text[:100] if hasattr(resp, 'text') else 'пусто'}")
+                return None
+
+            # Сохранение файла
+            os.makedirs("generated_article_images", exist_ok=True)
+            import uuid
+            filename = f"google_gen_{uuid.uuid4().hex[:8]}.png"
+            filepath = os.path.join("generated_article_images", filename)
+            
+            with open(filepath, "wb") as f:
+                f.write(img_bytes)
+            
+            logger.info(f"Изображение сохранено: {filepath}")
+            return filepath
+
+        except Exception as e:
+            _err(f"Ошибка Google GenAI: {str(e)[:150]}")
+            return None
+
+    def generate_image_dalle(
+        self, prompt: str, size: str = "512x512", style: str = "natural", errors: Optional[List[str]] = None
+    ) -> Optional[str]:
         """Генерация изображения через DALL-E 2 API"""
         if not self.dalle_api_key:
             logger.warning("DALL-E 2 API ключ не настроен")
             return None
 
+        def _err(msg: str) -> None:
+            if errors is not None:
+                errors.append(msg)
+            logger.warning(msg)
+
         try:
             import openai
-
-            # Настраиваем OpenAI клиент для DALL-E
             client = openai.OpenAI(api_key=self.dalle_api_key)
-
-            # Создаем промпт для медицинского изображения
             medical_prompt = f"Medical illustration in {style} style: {prompt}"
             if "medical" in style.lower():
                 medical_prompt += ". Professional medical diagram, clear and educational."
 
-            logger.info(f"Генерация изображения через DALL-E 2: {medical_prompt}")
-            logger.info(f"Размер: {size}, Стиль: {style}")
-
-            # Создаем изображение через DALL-E 2
             response = client.images.generate(
                 model="dall-e-2",
                 prompt=medical_prompt,
@@ -493,36 +734,26 @@ class IllustrationPipeline:
                 n=1,
             )
 
-            # Получаем URL сгенерированного изображения
             image_url = response.data[0].url
-
             if image_url:
-                # Скачиваем и сохраняем изображение
                 import uuid
                 image_response = requests.get(image_url)
                 if image_response.status_code == 200:
-                    # Создаем уникальное имя файла
                     filename = f"dalle_redraw_{uuid.uuid4().hex[:8]}.png"
                     filepath = os.path.join("extracted_images", filename)
-
                     os.makedirs("extracted_images", exist_ok=True)
                     with open(filepath, 'wb') as f:
                         f.write(image_response.content)
-
-                    logger.info(f"Изображение сохранено: {filepath}")
                     return filepath
-                else:
-                    logger.error(f"Не удалось скачать изображение: {image_response.status_code}")
-                    return None
-            else:
-                logger.error("Не получен URL изображения от DALL-E")
-                return None
-
-        except ImportError:
-            logger.error("OpenAI библиотека не установлена. Установите ее командой: pip install openai")
             return None
         except Exception as e:
-            logger.error(f"Ошибка генерации изображения через DALL-E 2: {e}")
+            err_str = str(e)
+            if "insufficient_quota" in err_str.lower() or "quota" in err_str.lower():
+                _err("DALL-E: лимит/квота исчерпана")
+            elif "invalid_api_key" in err_str.lower() or "401" in err_str:
+                _err("DALL-E: неверный API ключ")
+            else:
+                _err(f"DALL-E: {err_str[:120]}")
             return None
 
     def process_illustrations(self, pdf_path: str, progress_callback=None, error_callback=None) -> Dict:
@@ -552,52 +783,65 @@ class IllustrationPipeline:
                 if dicom_results:
                     results["search_results"] += len(dicom_results)
                     results["pathologies_found"].append(image["pathology"])
-                    # Сохраняем найденные DICOM изображения
                     for dicom in dicom_results:
                         if isinstance(dicom, dict):
                             results["found_images"].append({
                                 "pathology": image["pathology"],
                                 "source": "TCIA",
                                 "title": dicom.get("Collection", "DICOM Collection"),
-                                "url": None,  # TCIA не предоставляет прямые URL изображений
+                                "url": None,
                                 "thumbnail": None
                             })
-                        else:
-                            logger.warning(f"Пропущен некорректный DICOM результат: {type(dicom)} - {dicom}")
                     logger.info(f"Найдены DICOM файлы для патологии: {image['pathology']}")
                 else:
-                    # Поиск в Google Images
-                    google_results = self.search_images_google(
-                        f"{image['pathology']} medical imaging x-ray",
+                    # Сначала пробуем Tavily (по желанию пользователя это теперь основной инструмент)
+                    tavily_results = self.search_images_tavily(
+                        f"{image['pathology']} medical illustration x-ray",
                         error_callback=error_callback
                     )
 
-                    if google_results:
-                        results["search_results"] += len(google_results)
-                        # Сохраняем найденные Google изображения
-                        for google_img in google_results:
-                            if isinstance(google_img, dict):
+                    if tavily_results:
+                        results["search_results"] += len(tavily_results)
+                        for tav_img in tavily_results:
+                            if isinstance(tav_img, dict):
                                 results["found_images"].append({
                                     "pathology": image["pathology"],
-                                    "source": "Google Images",
-                                    "title": google_img.get("title", "Medical Image"),
-                                    "url": google_img.get("url"),  # Исправлено: было "link"
-                                    "thumbnail": google_img.get("thumbnail")  # Исправлено: убираем лишний .get("src")
+                                    "source": "Tavily Search",
+                                    "title": tav_img.get("title", "Medical Image"),
+                                    "url": tav_img.get("url"),
+                                    "thumbnail": None
                                 })
-                            else:
-                                logger.warning(f"Пропущен некорректный Google результат: {type(google_img)} - {google_img}")
-                        logger.info(f"Найдены изображения в Google для патологии: {image['pathology']}")
+                        logger.info(f"Найдены изображения в Tavily для патологии: {image['pathology']}")
                     else:
-                        # Добавляем в список патологий в розыске
-                        if image["pathology"] not in [p["pathology"] for p in self.pathology_search_list]:
-                            self.pathology_search_list.append({
-                                "pathology": image["pathology"],
-                                "context": image["text_around"],
-                                "date_added": str(Path().cwd()),
-                                "status": "searching"
-                            })
-                            results["pathologies_missing"].append(image["pathology"])
-                            logger.warning(f"Патология добавлена в розыск: {image['pathology']}")
+                        # Поиск в Google Images (вторым темпом)
+                        google_results = self.search_images_google(
+                            f"{image['pathology']} medical imaging x-ray",
+                            error_callback=error_callback
+                        )
+
+                        if google_results:
+                            results["search_results"] += len(google_results)
+                            for google_img in google_results:
+                                if isinstance(google_img, dict):
+                                    results["found_images"].append({
+                                        "pathology": image["pathology"],
+                                        "source": "Google Images",
+                                        "title": google_img.get("title", "Medical Image"),
+                                        "url": google_img.get("url"),
+                                        "thumbnail": google_img.get("thumbnail")
+                                    })
+                            logger.info(f"Найдены изображения в Google для патологии: {image['pathology']}")
+                        else:
+                            # Добавляем в список патологий в розыске
+                            if image["pathology"] not in [p["pathology"] for p in self.pathology_search_list]:
+                                self.pathology_search_list.append({
+                                    "pathology": image["pathology"],
+                                    "context": image["text_around"],
+                                    "date_added": str(Path().cwd()),
+                                    "status": "searching"
+                                })
+                                results["pathologies_missing"].append(image["pathology"])
+                                logger.warning(f"Патология добавлена в розыск: {image['pathology']}")
             
             elif image["classification"] == "encyclopedia":
                 # Генерация современной энциклопедической иллюстрации
@@ -620,15 +864,17 @@ class IllustrationPipeline:
         """Получение списка патологий в розыске"""
         return self.pathology_search_list
 
-    def redraw_image_with_nanobanana(self, image_info: Dict, custom_prompt: Optional[str] = None, size: str = "512x512") -> Optional[str]:
-        """Перерисовка изображения через Google Gemini (Nano Banana)"""
+    def redraw_image_with_nanobanana(self, image_info: Dict, custom_prompt: Optional[str] = None, size: str = "512x512") -> Tuple[Optional[str], Optional[str]]:
+        """Перерисовка изображения через Google Gemini (Nano Banana). Возвращает (путь_к_файлу или None, сообщение_об_ошибке или None)."""
         if not GOOGLE_GENAI_AVAILABLE:
-            logger.error("Google GenAI library not installed. Install with: pip install google-genai")
-            return None
+            msg = "Библиотека google-genai не установлена. Установите: pip install google-genai"
+            logger.error(msg)
+            return None, msg
 
         if not self.nanobanana_api_key:
-            logger.warning("Nano Banana API ключ не настроен")
-            return None
+            msg = "NanoBanana (Gemini) API ключ не настроен. Укажите ключ в Настройках."
+            logger.warning(msg)
+            return None, msg
 
         try:
             # Создаем промпт на основе описания изображения
@@ -678,68 +924,109 @@ class IllustrationPipeline:
             # Инициализация клиента через API key
             client = genai.Client(api_key=self.nanobanana_api_key)
 
-            # Выбор модели для генерации изображений
-            model = "gemini-3-pro-image-preview"  # Модель с меньшей цензурой для генерации изображений
+            def _normalize_model_name(model_name: str) -> str:
+                m = (model_name or "").strip()
+                if not m:
+                    return "gemini-3-pro-image-preview"
+                low = m.lower().replace("_", "-").replace(" ", "-")
+                if low in {"nanobanana2", "nanobanana-2", "nana-banana-2", "nana-banana2", "nana-bananna-2"}:
+                    return "gemini-3-pro-image-preview"
+                return m
 
-            logger.info(f"Использование модели: {model}")
+            # Для перерисовки (Image-to-Image) используем gemini-3-pro-image-preview
+            model = _normalize_model_name(settings_manager.get("nanobanana_model", "gemini-3-pro-image-preview"))
+            logger.info(f"Использование модели: {model} (NanoBanana Img2Img)")
+            # Для improveExistingImages UI сейчас message из функции не выводит напрямую,
+            # но хотя бы логируем (и при необходимости можно будет вывести в UI).
+            logger.info(f"NanoBanana Img2Img: модель = {model}")
 
-            # Генерация изображения через Google Gemini API
-            resp = client.models.generate_content(
-                model=model,
-                contents=[prompt]
+            # Читаем исходное изображение
+            image_path = image_info.get('file_path')
+            if not image_path or not os.path.exists(image_path):
+                msg = f"Не найден исходный файл: {image_path}"
+                logger.error(msg)
+                return None, msg
+
+            with open(image_path, "rb") as f:
+                source_image_bytes = f.read()
+
+            # Инструкция для трансформации согласно спецификации + выбранный стиль.
+            transform_prompt = custom_prompt or "Enhance this image professionally with cinematic lighting and artistic quality"
+            style_prefix = ILLUSTRATION_STYLES.get(self.brand_style) or ILLUSTRATION_STYLES.get("academic", "")
+            style_clause = f" Style guidance: {style_prefix}." if style_prefix else ""
+            science = int(settings_manager.get("style_science", 3))
+            label_clause = (
+                " Use very simple Russian labels for children and broad audience (1-3 words), avoid complex terminology."
+                if science <= 2
+                else " Use medically precise Russian labels where needed."
+            )
+            instruction = (
+                f'Transform this image according to the following instructions: "{transform_prompt}".'
+                f" Generate a new image based on this.{style_clause}{label_clause}"
             )
 
+            # Запрос изображения в ответе (response_modalities), если SDK поддерживает
+            kwargs = {}
+            if hasattr(types, "GenerateContentConfig"):
+                try:
+                    if hasattr(types, "Modality"):
+                        kwargs["config"] = types.GenerateContentConfig(response_modalities=[types.Modality.TEXT, types.Modality.IMAGE])
+                    else:
+                        kwargs["config"] = types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"])
+                except Exception:
+                    pass
+
+            # Генерация контента (изображение + текст -> изображение)
+            def _gen(model_name: str):
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Content(
+                            parts=[
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        mime_type="image/jpeg",
+                                        data=source_image_bytes,
+                                    )
+                                ),
+                                types.Part(text=instruction),
+                            ]
+                        )
+                    ],
+                    **kwargs,
+                )
+
+            try:
+                resp = _gen(model)
+            except Exception as e:
+                # fallback на Flash
+                logger.warning(f"NanaBanana Pro недоступна, fallback на Flash: {str(e)[:120]}")
+                logger.warning("INFO: fallback img2img модель: gemini-2.5-flash-image")
+                resp = _gen("gemini-2.5-flash-image")
+
             # Обработка ответа
-            if hasattr(resp, 'candidates') and resp.candidates:
-                candidate = resp.candidates[0]
+            img_bytes = None
+            if resp.candidates:
+                for part in resp.candidates[0].content.parts:
+                    if part.inline_data:
+                        img_bytes = part.inline_data.data
+                        break
+            
+            if img_bytes:
+                output_filename = f"redrawn_{Path(image_info['file_path']).stem}.png"
+                output_path = Path("extracted_images") / output_filename
+                output_path.write_bytes(img_bytes)
+                logger.info(f"Изображение успешно сгенерировано NanaBanana Pro: {output_path}")
+                return str(output_path), None
 
-                if hasattr(candidate, 'content') and candidate.content:
-                    content = candidate.content
-
-                    if hasattr(content, 'parts') and content.parts:
-                        # Ищем часть с изображением (берем только ПЕРВОЕ изображение)
-                        for part in content.parts:
-                            # Проверяем inline_data (основная структура для изображений)
-                            if hasattr(part, 'inline_data') and part.inline_data is not None:
-                                inline_data = part.inline_data
-
-                                # Проверяем наличие данных
-                                if hasattr(inline_data, 'data') and inline_data.data is not None:
-                                    # Данные уже в байтах, не нужно декодировать из base64
-                                    img_bytes = inline_data.data
-
-                                    # Проверяем, что это действительно изображение (простая проверка)
-                                    if len(img_bytes) > 100:  # Минимальный размер для изображения
-                                        # Сохраняем изображение
-                                        output_filename = f"redrawn_{Path(image_info['file_path']).stem}.png"
-                                        output_path = Path("extracted_images") / output_filename
-
-                                        output_path.write_bytes(img_bytes)
-
-                                        logger.info(f"Изображение сохранено: {output_path} (размер: {len(img_bytes)} байт)")
-                                        logger.info("Обработка остановлена после генерации первого изображения")
-                                        return str(output_path)
-                                    else:
-                                        logger.warning(f"Получены некорректные данные изображения, размер: {len(img_bytes)} байт")
-                                else:
-                                    logger.warning("inline_data.data is None - изображение не сгенерировано")
-                            else:
-                                # Проверяем, есть ли текстовая часть с объяснением отказа
-                                if hasattr(part, 'text') and part.text:
-                                    logger.warning(f"API вернул текстовый ответ вместо изображения: {part.text[:200]}...")
-                                    # Если это сообщение об отказе в генерации, попробуем другой подход
-                                    if "policy" in part.text.lower() or "medical" in part.text.lower():
-                                        logger.warning("API отказал в генерации из-за медицинского контента")
-
-            # Если не нашли изображение в стандартной структуре
-            logger.error("Изображение не найдено в ответе API")
-            logger.debug(f"Структура ответа: candidates={len(resp.candidates) if hasattr(resp, 'candidates') else 'N/A'}")
-
-            return None
+            msg = "Модель не вернула изображение в ответе. Проверьте доступ к модели gemini-2.5-flash-image и квоты."
+            logger.error(msg)
+            return None, msg
 
         except Exception as e:
+            msg = str(e)
             logger.error(f"Ошибка перерисовки изображения через Google Gemini: {e}")
-            return None
+            return None, msg
 
     def get_image_metadata(self, image_path: str) -> Optional[Dict]:
         """Получение метаданных изображения по пути к файлу"""

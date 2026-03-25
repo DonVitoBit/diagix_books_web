@@ -1,0 +1,13 @@
+[server]
+headless = true
+# Отключаем XSRF, чтобы file_uploader не возвращал 403 (особенно за прокси/удалённый доступ)
+enableXsrfProtection = false
+enableCORS = false
+# Отключаем сжатие WebSocket — за прокси часто ломается (502)
+enableWebsocketCompression = false
+
+[browser]
+# Открывать в браузере по умолчанию (при запуске из run_web_app.py не мешает)
+gatherUsageStats = false
+# Публичный адрес при доступе через nginx — чтобы WebSocket и запросы шли на один хост/порт
+serverAddress = "95.174.93.35"

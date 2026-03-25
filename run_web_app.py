@@ -3,12 +3,70 @@
 Скрипт для запуска веб-приложения Text Re-phraser
 """
 
+from __future__ import annotations
+
+import argparse
+import importlib.util
 import subprocess
 import sys
 import os
 
+
+REQUIRED_MODULES = [
+    "streamlit",
+    "openai",
+    "fitz",  # PyMuPDF
+    "docx",  # python-docx
+    "markdown",
+    "langdetect",
+]
+
+
+def _in_venv() -> bool:
+    return getattr(sys, "base_prefix", sys.prefix) != sys.prefix
+
+
+def _missing_modules() -> list[str]:
+    missing: list[str] = []
+    for module in REQUIRED_MODULES:
+        if importlib.util.find_spec(module) is None:
+            missing.append(module)
+    return missing
+
+
+def _print_install_help(missing: list[str]) -> None:
+    print("❌ Не установлены зависимости для запуска.")
+    print(f"Отсутствуют модули: {', '.join(missing)}")
+    print()
+    if not _in_venv():
+        print("💡 Рекомендуется запускать в виртуальном окружении:")
+        print("  python3 -m venv .venv")
+        print("  source .venv/bin/activate")
+        print()
+    print("Установите зависимости и повторите запуск:")
+    print("  python -m pip install -r requirements.txt")
+
+
+def _try_install_requirements() -> bool:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
 def main():
     """Запуск веб-приложения Streamlit"""
+
+    parser = argparse.ArgumentParser(description="Run Text Re-phraser Streamlit app")
+    parser.add_argument("--host", default="localhost", help="Server address (default: localhost)")
+    parser.add_argument("--port", type=int, default=8501, help="Server port (default: 8501)")
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help="Try to install missing dependencies via pip (requires internet access)",
+    )
+    args, unknown = parser.parse_known_args()
 
     print("🚀 Запуск веб-приложения Text Re-phraser...")
     print("=" * 50)
@@ -17,51 +75,46 @@ def main():
     if not os.path.exists("app.py"):
         print("❌ Ошибка: файл app.py не найден!")
         print("💡 Убедитесь, что вы находитесь в корневой директории проекта")
-        return
+        sys.exit(2)
 
-    # Проверка наличия зависимостей
-    try:
-        import streamlit
-        print("✅ Streamlit найден")
-    except ImportError:
-        print("⚠️  Streamlit не установлен. Установка...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "streamlit>=1.28.0"])
-            print("✅ Streamlit успешно установлен")
-        except subprocess.CalledProcessError:
-            print("❌ Ошибка установки Streamlit")
-            return
+    missing = _missing_modules()
+    if missing:
+        if args.install:
+            print("⚠️ Обнаружены отсутствующие зависимости. Пытаюсь установить через pip...")
+            if not _try_install_requirements():
+                print("❌ Установка зависимостей не удалась.")
+                _print_install_help(missing)
+                sys.exit(1)
+            missing = _missing_modules()
 
-    # Проверка других зависимостей
-    required_packages = ["openai", "PyMuPDF", "python-docx", "markdown"]
-    missing_packages = []
-
-    for package in required_packages:
-        try:
-            __import__(package)
-            print(f"✅ {package} найден")
-        except ImportError:
-            missing_packages.append(package)
-
-    if missing_packages:
-        print(f"⚠️  Отсутствующие пакеты: {', '.join(missing_packages)}")
-        print("💡 Установка всех зависимостей...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
-            print("✅ Все зависимости установлены")
-        except subprocess.CalledProcessError:
-            print("❌ Ошибка установки зависимостей")
-            return
+        if missing:
+            _print_install_help(missing)
+            sys.exit(1)
 
     print("\n" + "=" * 50)
     print("🌐 Запуск веб-сервера...")
-    print("📱 Приложение будет доступно по адресу: http://localhost:8501")
+    print(f"📱 Приложение будет доступно по адресу: http://{args.host}:{args.port}")
     print("🛑 Для остановки нажмите Ctrl+C")
     print("=" * 50)
 
     # Запуск Streamlit
     try:
-        subprocess.run([sys.executable, "-m", "streamlit", "run", "app.py"], check=True)
+        cmd = [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            "app.py",
+            "--server.address",
+            str(args.host),
+            "--server.port",
+            str(args.port),
+            "--server.enableWebsocketCompression=false",
+            "--server.enableCORS=false",
+            "--server.enableXsrfProtection=false",
+            *unknown,
+        ]
+        subprocess.run(cmd, check=True)
     except KeyboardInterrupt:
         print("\n\n👋 Веб-приложение остановлено пользователем")
     except subprocess.CalledProcessError as e:

@@ -21,12 +21,12 @@ class ImageGallery:
             max_images: Максимальное количество изображений для отображения
         """
         if not os.path.exists(images_dir):
-            st.warning(f"📁 Директория {images_dir} не найдена")
+            st.warning(f"Директория {images_dir} не найдена")
             return
 
         image_files = [f for f in os.listdir(images_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
         if not image_files:
-            st.info("📭 Изображения не найдены в директории extracted_images")
+            st.info("Изображения не найдены в директории extracted_images")
             return
 
         # Сортируем по имени файла (page_1_img_0.png, page_1_img_1.png, etc.)
@@ -35,8 +35,8 @@ class ImageGallery:
         # Ограничиваем количество изображений для отображения
         display_files = image_files[:max_images]
 
-        st.subheader("🎠 Карусель извлеченных изображений")
-        st.write(f"📊 Найдено изображений: {len(image_files)} | Показано: {len(display_files)}")
+        st.subheader("Карусель извлеченных изображений")
+        st.write(f"Найдено изображений: {len(image_files)} | Показано: {len(display_files)}")
 
         # Создаем колонки для изображений (максимум 4 в ряд для лучшего отображения)
         cols_per_row = min(4, len(display_files))
@@ -52,14 +52,14 @@ class ImageGallery:
                         image_path = os.path.join(images_dir, image_file)
                         try:
                             # Используем st.image с правильными параметрами
-                            st.image(image_path, caption=f"{image_file}", width=150, use_container_width=False)
+                            st.image(image_path, caption=f"{image_file}", width=150)
                         except Exception as e:
-                            st.error(f"❌ Ошибка загрузки {image_file}: {str(e)}")
+                            st.error(f"Ошибка загрузки {image_file}: {str(e)}")
                             # Показываем путь для диагностики
                             st.code(f"Путь: {image_path}")
 
         if len(image_files) > max_images:
-            st.info(f"ℹ️ Показано {max_images} изображений из {len(image_files)}. Обработка продолжается...")
+            st.info(f"Показано {max_images} изображений из {len(image_files)}. Обработка продолжается...")
 
     @staticmethod
     def display_found_images(results: Dict):
@@ -72,7 +72,7 @@ class ImageGallery:
         if not results.get("found_images"):
             return
 
-        st.subheader("🖼️ Найденные изображения из поиска")
+        st.subheader("Найденные изображения из поиска")
 
         # Проверяем и фильтруем найденные изображения
         valid_images = []
@@ -80,7 +80,7 @@ class ImageGallery:
             if isinstance(img, dict) and "pathology" in img and "source" in img:
                 valid_images.append(img)
             else:
-                st.warning(f"⚠️ Пропущено некорректное изображение: {type(img)} - {str(img)[:100]}...")
+                st.warning(f"Пропущено некорректное изображение: {type(img)} - {str(img)[:100]}...")
 
         if not valid_images:
             st.info("ℹ️ Не найдено корректных изображений для отображения")
@@ -96,7 +96,7 @@ class ImageGallery:
 
         # Отображаем по каждой патологии
         for pathology, images in images_by_pathology.items():
-            with st.expander(f"🔍 {pathology} ({len(images)} изображений)", expanded=False):
+            with st.expander(f"{pathology} ({len(images)} изображений)", expanded=False):
                 st.write(f"**Патология:** {pathology}")
                 st.write(f"**Найдено изображений:** {len(images)}")
 
@@ -109,13 +109,13 @@ class ImageGallery:
                             try:
                                 if "url" in img:
                                     st.image(img["url"], caption=f"{pathology}", width=200)
-                                    st.markdown(f"[🔗 Открыть изображение]({img['url']})")
+                                    st.markdown(f"[Открыть изображение]({img['url']})")
                                 else:
                                     st.write(f"Изображение: {img.get('title', 'Без названия')}")
                                     if "description" in img:
                                         st.write(f"Описание: {img['description']}")
                             except Exception as e:
-                                st.error(f"❌ Ошибка загрузки изображения: {str(e)}")
+                                st.error(f"Ошибка загрузки изображения: {str(e)}")
 
     @staticmethod
     def display_single_image_with_metadata(image_path: str, metadata: Optional[Dict] = None):
@@ -129,22 +129,22 @@ class ImageGallery:
         try:
             st.image(image_path, caption=os.path.basename(image_path), width=400)
         except Exception as e:
-            st.error(f"❌ Ошибка загрузки изображения: {str(e)}")
+            st.error(f"Ошибка загрузки изображения: {str(e)}")
             return
 
         # Отображение метаданных
         if metadata:
             text_around = metadata.get("text_around", "").strip()
             if text_around:
-                st.subheader("📝 Подпись к изображению")
+                st.subheader("Подпись к изображению")
                 st.info(text_around)
 
                 # Информация о классификации
                 classification = metadata.get("classification", "unknown")
                 if classification == "clinical":
-                    st.success("🏥 **Тип:** Клиническое изображение (рентген, диагностика)")
+                    st.success("**Тип:** Клиническое изображение (рентген, диагностика)")
                 elif classification == "encyclopedia":
-                    st.info("📚 **Тип:** Энциклопедическое изображение (схема, диаграмма)")
+                    st.info("**Тип:** Энциклопедическое изображение (схема, диаграмма)")
                 else:
                     st.write(f"**Тип:** {classification}")
 
@@ -153,6 +153,6 @@ class ImageGallery:
                 if pathology:
                     st.write(f"**Патология:** {pathology}")
             else:
-                st.warning("⚠️ Подпись к изображению не найдена")
+                st.warning("Подпись к изображению не найдена")
         else:
-            st.info("ℹ️ Метаданные изображения не найдены. Извлеките изображения заново для получения подписей.")
+            st.info("Метаданные изображения не найдены. Извлеките изображения заново для получения подписей.")

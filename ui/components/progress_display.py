@@ -39,7 +39,7 @@ class ProgressDisplay:
         if self.status_text:
             self.status_text.text(message)
 
-    def complete(self, final_message: str = "✅ Обработка завершена!"):
+    def complete(self, final_message: str = "Обработка завершена."):
         """Завершение отображения прогресса"""
         if self.progress_bar:
             self.progress_bar.progress(1.0)
@@ -60,7 +60,7 @@ class ProgressDisplay:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Контекстный менеджер - выход"""
         if exc_type:
-            self.update_message(f"❌ Ошибка: {str(exc_val)}")
+            self.update_message(f"Ошибка: {str(exc_val)}")
         else:
             self.complete()
         self.cleanup()

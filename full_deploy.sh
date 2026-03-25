@@ -6,7 +6,7 @@ set timeout 60
 set host "147.45.232.140"
 set user "root"
 set password "qQ6H^c7-et5J+S"
-set archive_path "/Users/artembutko/Downloads/diagix_books_web.tar.gz"
+set archive_path "/Users/artembutko/Desktop/med_book/diagix_books_web.tar.gz"
 
 # Подключение к серверу
 spawn scp $archive_path $user@$host:/tmp/
